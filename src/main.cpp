@@ -69,6 +69,17 @@ uint8_t batteryPercent(float vbat) {
   return uint8_t((vbat - kEmptyV) * 100.0f / (kFullV - kEmptyV));
 }
 
+// On-board RGB LED helpers — dim (32/255) so it isn't obnoxious on the desk.
+void ledOff()  { rgbLedWrite(RGB_BUILTIN, 0, 0, 0); }
+void ledRed()  { rgbLedWrite(RGB_BUILTIN, 32, 0, 0); }
+void ledBlue() { rgbLedWrite(RGB_BUILTIN, 0, 0, 32); }
+
+void blinkLedOnReport() {
+  ledBlue();
+  delay(20);
+  ledOff();
+}
+
 ZigbeeAnalog zbDistance(EP_DISTANCE);
 ZigbeeAnalog zbLevel(EP_LEVEL);
 
@@ -106,10 +117,12 @@ void setup() {
   }
 
   Serial.print("Connecting to network");
+  ledRed();
   while (!Zigbee.connected()) {
     Serial.print(".");
     delay(100);
   }
+  ledOff();
   Serial.println();
 
   zbDistance.setAnalogInputReporting(kRptMin, kRptMax, kRptDeltaCm);
@@ -131,5 +144,6 @@ void loop() {
   zbDistance.setBatteryVoltage(uint8_t(vbat * 10.0f));   // attribute is in 100-mV units
   zbDistance.reportBatteryPercentage();
 
+  blinkLedOnReport();
   delay(kReportTickMs);
 }
