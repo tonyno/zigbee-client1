@@ -8,10 +8,11 @@ reports it over Zigbee to a coordinator (Home Assistant via ZHA or
 Zigbee2MQTT), and goes back to deep sleep. Optimized for multi-year battery
 life on an 18650 Li-Ion cell.
 
-Currently the project is a working starter from
+The project started from
 https://github.com/technoo10201/esp32-c6-zigbee-example-platformio
-(Zigbee on/off light bulb example), used to validate the toolchain. The next
-step is to replace the example logic with the sleepy distance sensor pattern.
+(Zigbee on/off light bulb example), which validated the toolchain. The
+firmware has since been re-targeted to a water-tank distance sensor; see
+"Zigbee device profile" below.
 
 ## Hardware
 
@@ -24,9 +25,15 @@ step is to replace the example logic with the sleepy distance sensor pattern.
 - **Power:** USB-C, 5V DC, or solar; integrated Li-Ion charger and battery monitoring
 - **Distance sensor (planned):** VL53L1X ToF over I²C (low power, 3.3V, ~20 mA only during ~30 ms measurement). HC-SR04 considered but rejected — too power-hungry and needs 5V.
 
-## Operational pattern (target)
+## Operational pattern
 
-- Sleepy Zigbee End Device (ZED).
+**Current iteration (always-on):** the firmware runs continuously, reports
+on Zigbee min/max/delta intervals (10–60 s), and uses a fake distance
+generator so the Zigbee data path can be exercised without the ToF sensor.
+Battery is measured for real on GPIO0.
+
+**Final target (sleepy ZED, deferred — see TODO list):**
+
 - Boot → join/rejoin Zigbee network → take measurement → report attribute → wait for ZCL ack → `esp_deep_sleep_start()`.
 - Deep sleep duration: ~3600 seconds.
 - Network credentials persist in NVS across deep sleep, so `Zigbee.begin()` rejoins automatically (~3 s reconnect time observed in similar projects).
@@ -174,12 +181,70 @@ pio run -t clean && pio run -v 2>&1 | grep -- "--flash-size"
 pio run -v 2>&1 | grep "ARDUINO_PARTITION_" | head -3
 ```
 
+## Zigbee device profile
+
+The firmware identifies as a water-tank distance sensor. Strings used in
+the Basic cluster (durable — re-pairing required to change):
+
+| Field             | Value                |
+| ----------------- | -------------------- |
+| Manufacturer name | `czechit`            |
+| Model identifier  | `water-tank-sensor`  |
+| Power source      | `Battery`            |
+
+Two endpoints, both `ZigbeeAnalog`:
+
+- **Endpoint 10** — Analog Input cluster reporting distance to water surface
+  in **centimetres** (range 0–500, resolution 0.1 cm). Also hosts the
+  Basic + Power Configuration clusters with a reportable battery percentage.
+- **Endpoint 11** — Analog Input cluster reporting tank fill level in
+  **percent** (range 0–100, resolution 1 %). Computed firmware-side from
+  compile-time `kEmptyDistanceCm` / `kFullDistanceCm` constants.
+
+Reporting config (set via `setAnalogInputReporting`): `min=10s`, `max=60s`,
+delta `1.0` (cm or %).
+
+Battery is read from **GPIO0** through the FireBeetle 2 C6 built-in **2:1
+voltage divider**: `VBAT = analogReadMilliVolts(0) × 2`. Linear-with-clamp
+mapping to percentage (4.20 V → 100 %, 3.30 V → 0 %).
+
+The device does **not** ship with a zigbee2mqtt external converter —
+z2m's generic auto-handling exposes the Analog Inputs and battery
+correctly, just with `analog_input` rather than `distance`/`level` labels.
+Pretty labels are a follow-up (see TODO list).
+
+The full design lives in
+`docs/superpowers/specs/2026-05-06-water-tank-zigbee-design.md`.
+
 ## Current status
 
 - ✅ Toolchain validated: pioarduino + Arduino + Zigbee + ESP32-C6 building, flashing, and running on the DFR1075.
 - ✅ Default Zigbee on/off light bulb example flashed successfully (619 KB firmware, 46% of 1.25 MB app slot used, 33 KB RAM).
-- ⏳ Next: replace example with sleepy distance sensor implementation (use `Zigbee_Temp_Hum_Sensor_Sleepy.ino` as starting point; adapt for VL53L1X distance over I²C, 1-hour deep sleep cycle).
-- ⏳ Then: pair with Home Assistant Zigbee coordinator, validate end-to-end measurement flow, then characterize battery life.
+- ✅ Zigbee device-profile design approved (see spec linked above).
+- ⏳ In progress: replace `src/main.cpp` with the water-tank-sensor firmware. Always-on iteration with a fake triangle-wave distance generator and real GPIO0 battery measurement; deep sleep deferred.
+- ⏳ Then: pair with Home Assistant via zigbee2mqtt, confirm `czechit / water-tank-sensor` shows up with two Analog Inputs + battery, confirm reports flow.
+
+## TODO (deferred follow-ups)
+
+In rough priority order:
+
+1. **Wire the VL53L1X ToF sensor** on I²C and replace the fake distance
+   generator with real measurements. Confirm DFR1075 default I²C pins
+   from the wiki.
+2. **Refine battery SoC mapping.** Replace the linear `batteryPercent()`
+   with a multi-point Li-Po discharge curve once drift is observed.
+   Recalibrate the divider ratio against a multimeter (wiki says 2.0;
+   community reports ~2.1218).
+3. **Add deep-sleep cycle.** Restructure `loop()` → `setup()`-only flow:
+   single report and `esp_deep_sleep_start(3600 × 1e6)`. Drop the LED
+   indicator (battery cost). Tune cadence for multi-year target.
+4. **zigbee2mqtt external converter** for pretty `distance` / `level`
+   exposes. ~30 lines of JS in z2m's `data/external_converters/`,
+   matching on `manufacturerName="czechit"` and `modelID="water-tank-sensor"`.
+   Defer until the device is otherwise stable.
+5. **Single-`factory` partition layout.** Switch from the dual-OTA layout
+   once OTA flexibility is no longer wanted (frees ~1.4 MB; wipes NVS,
+   forcing a re-pair).
 
 ## References
 
