@@ -208,10 +208,20 @@ Battery is read from **GPIO0** through the FireBeetle 2 C6 built-in **2:1
 voltage divider**: `VBAT = analogReadMilliVolts(0) × 2`. Linear-with-clamp
 mapping to percentage (4.20 V → 100 %, 3.30 V → 0 %).
 
-The device does **not** ship with a zigbee2mqtt external converter —
-z2m's generic auto-handling exposes the Analog Inputs and battery
-correctly, just with `analog_input` rather than `distance`/`level` labels.
-Pretty labels are a follow-up (see TODO list).
+A zigbee2mqtt external converter ships with this repo at
+`z2m/external_converters/czechit-water-tank-sensor.js`. It is required,
+not cosmetic: z2m's generic auto-handler exposes the Analog Inputs but
+does not auto-configure attribute reporting for them, so without the
+converter values only refresh on manual reads. The converter's
+`configure()` callback binds the relevant clusters to the coordinator
+and registers reporting on pairing. It also relabels the values as
+`distance` (cm) / `level` (%) instead of generic `analog_input` (°C).
+
+Install: copy the JS file into your z2m external_converters directory
+(on Home Assistant z2m add-on installs that's
+`/config/zigbee2mqtt/external_converters/`), then restart z2m and
+re-pair the device. See `z2m/external_converters/README.md` for full
+steps.
 
 The full design lives in
 `docs/superpowers/specs/2026-05-06-water-tank-zigbee-design.md`.
@@ -221,8 +231,10 @@ The full design lives in
 - ✅ Toolchain validated: pioarduino + Arduino + Zigbee + ESP32-C6 building, flashing, and running on the DFR1075.
 - ✅ Default Zigbee on/off light bulb example flashed successfully (619 KB firmware, 46% of 1.25 MB app slot used, 33 KB RAM).
 - ✅ Zigbee device-profile design approved (see spec linked above).
-- ⏳ In progress: replace `src/main.cpp` with the water-tank-sensor firmware. Always-on iteration with a fake triangle-wave distance generator and real GPIO0 battery measurement; deep sleep deferred.
-- ⏳ Then: pair with Home Assistant via zigbee2mqtt, confirm `czechit / water-tank-sensor` shows up with two Analog Inputs + battery, confirm reports flow.
+- ✅ Firmware written: always-on water-tank-sensor with fake triangle-wave distance, real GPIO0 battery sense, two ZigbeeAnalog endpoints, identity strings, factory-reset button, color-cycling RGB LED heartbeat. Builds cleanly (`pio run`).
+- ✅ Verified on hardware: device pairs in z2m as `czechit / water-tank-sensor`, manual refresh returns correct values (distance/level/battery), serial monitor shows triangle-wave running.
+- ✅ z2m external converter shipped (`z2m/external_converters/czechit-water-tank-sensor.js`) so unsolicited reports flow without manual binding.
+- ⏳ Now: copy converter into z2m, restart, re-pair, confirm reports flow without manual refresh.
 
 ## TODO (deferred follow-ups)
 
@@ -238,11 +250,7 @@ In rough priority order:
 3. **Add deep-sleep cycle.** Restructure `loop()` → `setup()`-only flow:
    single report and `esp_deep_sleep_start(3600 × 1e6)`. Drop the LED
    indicator (battery cost). Tune cadence for multi-year target.
-4. **zigbee2mqtt external converter** for pretty `distance` / `level`
-   exposes. ~30 lines of JS in z2m's `data/external_converters/`,
-   matching on `manufacturerName="czechit"` and `modelID="water-tank-sensor"`.
-   Defer until the device is otherwise stable.
-5. **Single-`factory` partition layout.** Switch from the dual-OTA layout
+4. **Single-`factory` partition layout.** Switch from the dual-OTA layout
    once OTA flexibility is no longer wanted (frees ~1.4 MB; wipes NVS,
    forcing a re-pair).
 
