@@ -69,15 +69,44 @@ uint8_t batteryPercent(float vbat) {
   return uint8_t((vbat - kEmptyV) * 100.0f / (kFullV - kEmptyV));
 }
 
-// On-board RGB LED helpers — dim (32/255) so it isn't obnoxious on the desk.
-void ledOff()  { rgbLedWrite(RGB_BUILTIN, 0, 0, 0); }
-void ledRed()  { rgbLedWrite(RGB_BUILTIN, 32, 0, 0); }
-void ledBlue() { rgbLedWrite(RGB_BUILTIN, 0, 0, 32); }
+// On-board RGB LED helpers. Brightness 64/255 — visible across the room
+// without being obnoxious. Pure off helper avoids leaving stray colours on.
+constexpr uint8_t kLedBri = 64;
 
+void ledOff()   { rgbLedWrite(RGB_BUILTIN, 0, 0, 0); }
+void ledWhite() { rgbLedWrite(RGB_BUILTIN, kLedBri, kLedBri, kLedBri); }
+
+// Slow red breath: brighten then dim over ~640 ms. Used while joining the
+// network, replacing the previous solid red so you can see the device is
+// alive and trying.
+void ledJoinBreath() {
+  for (int b = 0; b <= kLedBri; b += 8) {
+    rgbLedWrite(RGB_BUILTIN, b, 0, 0);
+    delay(20);
+  }
+  for (int b = kLedBri; b >= 0; b -= 8) {
+    rgbLedWrite(RGB_BUILTIN, b, 0, 0);
+    delay(20);
+  }
+}
+
+// Loop-tick heartbeat that cycles through 5 distinct colours, so a glance at
+// the LED tells you both "loop() is alive" and roughly what tick we're on.
+// One full cycle = 5 seconds.
 void blinkLedOnReport() {
-  ledBlue();
-  delay(20);
+  static uint8_t i = 0;
+  uint8_t r = 0, g = 0, b = 0;
+  switch (i % 5) {
+    case 0: b = kLedBri;                break;   // blue
+    case 1: g = kLedBri; b = kLedBri;   break;   // cyan
+    case 2: g = kLedBri;                break;   // green
+    case 3: r = kLedBri; g = kLedBri;   break;   // yellow
+    case 4: r = kLedBri; b = kLedBri;   break;   // magenta
+  }
+  rgbLedWrite(RGB_BUILTIN, r, g, b);
+  delay(120);
   ledOff();
+  ++i;
 }
 
 ZigbeeAnalog zbDistance(EP_DISTANCE);
@@ -109,6 +138,12 @@ void setup() {
   delay(2000);
   Serial.println("boot");
 
+  // Brief white flash so it's obvious from across the desk that the chip
+  // just (re)started — useful when iterating without watching the serial.
+  ledWhite();
+  delay(80);
+  ledOff();
+
   analogReadResolution(12);
   pinMode(kBatteryAdcPin, INPUT);
   pinMode(BOOT_PIN, INPUT_PULLUP);
@@ -138,10 +173,9 @@ void setup() {
   }
 
   Serial.print("Connecting to network");
-  ledRed();
   while (!Zigbee.connected()) {
     Serial.print(".");
-    delay(100);
+    ledJoinBreath();   // ~640 ms per breath — replaces the previous delay(100)
   }
   ledOff();
   Serial.println();
@@ -169,4 +203,6 @@ void loop() {
 
   blinkLedOnReport();
   delay(kReportTickMs);
+
+  Serial.println("tick: distance=" + String(d, 1) + "cm level=" + String(pct, 1) + "% vbat=" + String(vbat, 2) + "V (" + String(bpct) + "%)");
 }
