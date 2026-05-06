@@ -83,6 +83,26 @@ void blinkLedOnReport() {
 ZigbeeAnalog zbDistance(EP_DISTANCE);
 ZigbeeAnalog zbLevel(EP_LEVEL);
 
+// 3-second BOOT-button hold triggers Zigbee.factoryReset() which clears
+// NVS-stored network credentials and reboots; the device must then be
+// re-paired in zigbee2mqtt.
+void handleFactoryResetButton() {
+  if (digitalRead(BOOT_PIN) != LOW) return;
+
+  delay(50);                                  // debounce
+  if (digitalRead(BOOT_PIN) != LOW) return;
+
+  uint32_t pressStart = millis();
+  while (digitalRead(BOOT_PIN) == LOW) {
+    delay(50);
+    if (millis() - pressStart > 3000) {
+      Serial.println("Factory reset triggered. Rebooting in 1s.");
+      delay(1000);
+      Zigbee.factoryReset();                  // does not return
+    }
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);
@@ -91,6 +111,7 @@ void setup() {
 
   analogReadResolution(12);
   pinMode(kBatteryAdcPin, INPUT);
+  pinMode(BOOT_PIN, INPUT_PULLUP);
 
   // EP 10: Basic + Power Config + Analog Input (distance in cm)
   zbDistance.setManufacturerAndModel(MFR, MODEL);
@@ -131,6 +152,8 @@ void setup() {
 }
 
 void loop() {
+  handleFactoryResetButton();
+
   uint32_t now = millis();
 
   float d   = fakeDistanceCm(now);
