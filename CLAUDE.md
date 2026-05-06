@@ -198,8 +198,10 @@ Two endpoints, both `ZigbeeAnalog`:
   **percent** (range 0–100, resolution 1 %). Computed firmware-side from
   compile-time `kEmptyDistanceCm` / `kFullDistanceCm` constants.
 
-Reporting config (set via `setAnalogInputReporting`): `min=10s`, `max=60s`,
-delta `1.0` (cm or %).
+Reporting: one explicit push per attribute per wake cycle (`reportAnalogInput()`
+on each endpoint; `reportBatteryPercentage()` on EP10). No min/max/delta
+binding configured firmware-side — the device is asleep most of the time, so
+periodic-on-delta reporting would be meaningless.
 
 Battery is read from **GPIO0** through the FireBeetle 2 C6 built-in **2:1
 voltage divider**: `VBAT = analogReadMilliVolts(0) × 2`. Linear-with-clamp
