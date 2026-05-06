@@ -40,13 +40,19 @@ uint8_t button = BOOT_PIN;
 ZigbeeLight zbLight = ZigbeeLight(ZIGBEE_LIGHT_ENDPOINT);
 
 /********************* RGB LED functions **************************/
-void setLED(bool value) {
+void setLED(bool value)
+{
   digitalWrite(led, value);
+  delay(10);
 }
 
 /********************* Arduino functions **************************/
-void setup() {
+void setup()
+{
   Serial.begin(115200);
+  Serial.setTxTimeoutMs(0);
+  delay(2000);
+  Serial.println("boot");
 
   // Init LED and turn it OFF (if LED_PIN == RGB_BUILTIN, the rgbLedWrite() will be used under the hood)
   pinMode(led, OUTPUT);
@@ -55,39 +61,46 @@ void setup() {
   // Init button for factory reset
   pinMode(button, INPUT_PULLUP);
 
-  //Optional: set Zigbee device name and model
+  // Optional: set Zigbee device name and model
   zbLight.setManufacturerAndModel("Espressif", "ZBLightBulb");
 
   // Set callback function for light change
   zbLight.onLightChange(setLED);
 
-  //Add endpoint to Zigbee Core
+  // Add endpoint to Zigbee Core
   Serial.println("Adding ZigbeeLight endpoint to Zigbee Core");
   Zigbee.addEndpoint(&zbLight);
 
   // When all EPs are registered, start Zigbee. By default acts as ZIGBEE_END_DEVICE
-  if (!Zigbee.begin()) {
+  if (!Zigbee.begin())
+  {
     Serial.println("Zigbee failed to start!");
     Serial.println("Rebooting...");
     ESP.restart();
   }
   Serial.println("Connecting to network");
-  while (!Zigbee.connected()) {
+  while (!Zigbee.connected())
+  {
     Serial.print(".");
     delay(100);
   }
   Serial.println();
 }
 
-void loop() {
+void loop()
+{
+  Serial.println("loop");
   // Checking button for factory reset
-  if (digitalRead(button) == LOW) {  // Push button pressed
+  if (digitalRead(button) == LOW)
+  { // Push button pressed
     // Key debounce handling
     delay(100);
     int startTime = millis();
-    while (digitalRead(button) == LOW) {
+    while (digitalRead(button) == LOW)
+    {
       delay(50);
-      if ((millis() - startTime) > 3000) {
+      if ((millis() - startTime) > 3000)
+      {
         // If key pressed for more than 3secs, factory reset Zigbee and reboot
         Serial.println("Resetting Zigbee to factory and rebooting in 1s.");
         delay(1000);
