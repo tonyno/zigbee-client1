@@ -102,6 +102,11 @@ void setup() {
   analogReadResolution(12);
   pinMode(kBatteryAdcPin, INPUT);
   pinMode(BOOT_PIN, INPUT_PULLUP);
+  // Factory reset has to be polled here — once the device enters its
+  // wake/sleep cycle, loop() is unreachable. To trigger it: press EN
+  // (reset) on the FireBeetle, then hold BOOT for 3 s during the brief
+  // window before Zigbee.begin().
+  handleFactoryResetButton();
 
   // EP 10: Basic + Power Config + Analog Input (distance in cm)
   zbDistance.setManufacturerAndModel(MFR, MODEL);
@@ -140,8 +145,6 @@ void setup() {
 }
 
 void loop() {
-  handleFactoryResetButton();
-
   uint32_t now = millis();
 
   float d   = fakeDistanceCm(now);
