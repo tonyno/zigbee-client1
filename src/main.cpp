@@ -19,13 +19,12 @@ constexpr float    kFullDistanceCm  =  20.0f;
 
 // ---- Fake distance generator ----
 constexpr uint32_t kWavePeriodMs = 5UL * 60UL * 1000UL;
-constexpr uint32_t kReportTickMs = 1000;
 
-// ---- Reporting config ----
-constexpr uint16_t kRptMin       = 10;     // s — min between reports
-constexpr uint16_t kRptMax       = 60;     // s — heartbeat
-constexpr float    kRptDeltaCm   = 1.0f;
-constexpr float    kRptDeltaPct  = 1.0f;
+// ---- Sleep cycle ----
+// Test cadence — bump to 3600 (1 h) for production once overnight battery
+// drain has been measured and looks acceptable.
+constexpr uint32_t kSleepSeconds = 60;
+constexpr uint32_t kRadioFlushMs = 500;   // post-report settle before sleep
 
 // ---- Battery sense (DFR1075 built-in 2:1 divider on GPIO0) ----
 constexpr uint8_t  kBatteryAdcPin = 0;
@@ -96,7 +95,7 @@ void handleFactoryResetButton() {
 void setup() {
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);
-  delay(2000);
+  delay(50);
   Serial.println("boot");
 
   analogReadResolution(12);
@@ -126,6 +125,12 @@ void setup() {
   Zigbee.addEndpoint(&zbDistance);
   Zigbee.addEndpoint(&zbLevel);
 
+  // Sleepy end device: tell the coordinator we won't keep our radio on
+  // listening between polls. This is the actual power-saving switch —
+  // deep sleep alone isn't enough if the coordinator thinks we're rx-on.
+  Zigbee.setRxOnWhenIdle(false);
+  Zigbee.setTimeout(10000);   // 10 s join timeout (default 30 s, longer = more battery)
+
   if (!Zigbee.begin()) {
     Serial.println("Zigbee failed to start! Rebooting...");
     delay(1000);
@@ -139,26 +144,34 @@ void setup() {
   }
   Serial.println();
 
-  zbDistance.setAnalogInputReporting(kRptMin, kRptMax, kRptDeltaCm);
-  zbLevel.setAnalogInputReporting(kRptMin, kRptMax, kRptDeltaPct);
-  Serial.println("Reporting configured");
-}
-
-void loop() {
+  // Measure → report → sleep. Runs once per cold boot or timer wake.
   uint32_t now = millis();
-
   float d   = fakeDistanceCm(now);
   float pct = computeLevelPct(d);
+
   zbDistance.setAnalogInput(d);
   zbLevel.setAnalogInput(pct);
+  zbDistance.reportAnalogInput();      // explicit push (no min/max/delta binding)
+  zbLevel.reportAnalogInput();
 
   float vbat   = readBatteryVoltage();
   uint8_t bpct = batteryPercent(vbat);
   zbDistance.setBatteryPercentage(bpct);
-  zbDistance.setBatteryVoltage(uint8_t(vbat * 10.0f));   // attribute is in 100-mV units
+  zbDistance.setBatteryVoltage(uint8_t(vbat * 10.0f));   // attribute is 100-mV units
   zbDistance.reportBatteryPercentage();
 
-  delay(kReportTickMs);
+  Serial.println("reported: distance=" + String(d, 1) + "cm level=" + String(pct, 1) + "% vbat=" + String(vbat, 2) + "V (" + String(bpct) + "%)");
 
-  Serial.println("tick: distance=" + String(d, 1) + "cm level=" + String(pct, 1) + "% vbat=" + String(vbat, 2) + "V (" + String(bpct) + "%)");
+  delay(kRadioFlushMs);                // let the radio drain queued frames
+
+  Serial.println("Sleeping for " + String(kSleepSeconds) + " s");
+  Serial.flush();                       // make sure the line lands before USB-CDC dies
+  esp_sleep_enable_timer_wakeup(uint64_t(kSleepSeconds) * 1000000ULL);
+  esp_deep_sleep_start();               // does not return
+}
+
+void loop() {
+  // Empty — every wake runs setup() to completion, then deep-sleeps.
+  // loop() is only reached if esp_deep_sleep_start() ever returns, which
+  // it doesn't.
 }
