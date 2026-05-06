@@ -118,5 +118,18 @@ void setup() {
 }
 
 void loop() {
-  delay(1000);
+  uint32_t now = millis();
+
+  float d   = fakeDistanceCm(now);
+  float pct = computeLevelPct(d);
+  zbDistance.setAnalogInput(d);
+  zbLevel.setAnalogInput(pct);
+
+  float vbat   = readBatteryVoltage();
+  uint8_t bpct = batteryPercent(vbat);
+  zbDistance.setBatteryPercentage(bpct);
+  zbDistance.setBatteryVoltage(uint8_t(vbat * 10.0f));   // attribute is in 100-mV units
+  zbDistance.reportBatteryPercentage();
+
+  delay(kReportTickMs);
 }
