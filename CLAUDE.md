@@ -27,17 +27,14 @@ firmware has since been re-targeted to a water-tank distance sensor; see
 
 ## Operational pattern
 
-**Current iteration (always-on):** the firmware runs continuously, reports
-on Zigbee min/max/delta intervals (10–60 s), and uses a fake distance
-generator so the Zigbee data path can be exercised without the ToF sensor.
-Battery is measured for real on GPIO0.
+**Current behavior (sleepy ZED):**
 
-**Final target (sleepy ZED, deferred — see TODO list):**
-
-- Boot → join/rejoin Zigbee network → take measurement → report attribute → wait for ZCL ack → `esp_deep_sleep_start()`.
-- Deep sleep duration: ~3600 seconds.
-- Network credentials persist in NVS across deep sleep, so `Zigbee.begin()` rejoins automatically (~3 s reconnect time observed in similar projects).
+- All work happens in `setup()`. `loop()` is empty.
+- Each wake: factory-reset check → `Zigbee.setRxOnWhenIdle(false)` → `Zigbee.begin()` (rejoins from NVS) → measure → `setAnalogInput` + `reportAnalogInput` per endpoint → `reportBatteryPercentage` → 500 ms radio-flush delay → `esp_deep_sleep_start(kSleepSeconds × 1e6)`.
+- `kSleepSeconds = 60` is the current test cadence (chosen for measuring overnight battery drain). Production target is `3600` (one hour) once drain numbers look acceptable — a single-constant change.
+- Network credentials persist in NVS across deep sleep, so warm-wake rejoins are fast (~3 s observed in similar ESP32-C6 projects).
 - Light sleep / instant command response is NOT supported in the Arduino framework. Don't try to add it. If that's needed later, the project must move to ESP-IDF + esp-zigbee-sdk directly.
+- Factory reset works only during the cold-boot window: press EN, then hold BOOT for 3 s before `Zigbee.begin()` is called. There's no LED indication.
 
 ## Toolchain
 
@@ -229,12 +226,11 @@ The full design lives in
 ## Current status
 
 - ✅ Toolchain validated: pioarduino + Arduino + Zigbee + ESP32-C6 building, flashing, and running on the DFR1075.
-- ✅ Default Zigbee on/off light bulb example flashed successfully (619 KB firmware, 46% of 1.25 MB app slot used, 33 KB RAM).
 - ✅ Zigbee device-profile design approved (see spec linked above).
-- ✅ Firmware written: always-on water-tank-sensor with fake triangle-wave distance, real GPIO0 battery sense, two ZigbeeAnalog endpoints, identity strings, factory-reset button, color-cycling RGB LED heartbeat. Builds cleanly (`pio run`).
-- ✅ Verified on hardware: device pairs in z2m as `czechit / water-tank-sensor`, manual refresh returns correct values (distance/level/battery), serial monitor shows triangle-wave running.
-- ✅ z2m external converter shipped (`z2m/external_converters/czechit-water-tank-sensor.js`) so unsolicited reports flow without manual binding.
-- ⏳ Now: copy converter into z2m, restart, re-pair, confirm reports flow without manual refresh.
+- ✅ Always-on firmware verified on hardware: device pairs in z2m as `czechit / water-tank-sensor`, distance/level/battery reportable.
+- ✅ z2m external converter shipped (`z2m/external_converters/czechit-water-tank-sensor.js`).
+- ✅ Sleepy ZED with 60-second deep-sleep cycle implemented; LEDs removed; factory reset moved to early `setup()`.
+- ⏳ Now: flash, re-pair if needed, leave on a fully-charged 18650 overnight, record battery % delta in z2m the next morning. That number tells us whether the multi-year-on-battery target is achievable at this cadence.
 
 ## TODO (deferred follow-ups)
 
@@ -247,10 +243,16 @@ In rough priority order:
    with a multi-point Li-Po discharge curve once drift is observed.
    Recalibrate the divider ratio against a multimeter (wiki says 2.0;
    community reports ~2.1218).
-3. **Add deep-sleep cycle.** Restructure `loop()` → `setup()`-only flow:
-   single report and `esp_deep_sleep_start(3600 × 1e6)`. Drop the LED
-   indicator (battery cost). Tune cadence for multi-year target.
-4. **Single-`factory` partition layout.** Switch from the dual-OTA layout
+3. **Tune `kSleepSeconds` to the production cadence.** After the overnight
+   drain measurement, raise the constant from 60 to 3600 (or whatever
+   number the math says hits the multi-year battery target). Single-
+   constant change in `src/main.cpp`.
+4. **Wait for ZCL report ack instead of fixed `delay(kRadioFlushMs)`.**
+   Use `Zigbee.onGlobalDefaultResponse(...)` to sleep as soon as the
+   coordinator confirms delivery, rather than waiting a fixed 500 ms.
+   Saves a small but non-trivial amount of active time per wake. The
+   pattern is in the upstream `Zigbee_Temp_Hum_Sensor_Sleepy` example.
+5. **Single-`factory` partition layout.** Switch from the dual-OTA layout
    once OTA flexibility is no longer wanted (frees ~1.4 MB; wipes NVS,
    forcing a re-pair).
 
