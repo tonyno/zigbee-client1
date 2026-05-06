@@ -31,6 +31,44 @@ constexpr float    kRptDeltaPct  = 1.0f;
 constexpr uint8_t  kBatteryAdcPin = 0;
 constexpr float    kVbatDividerK  = 2.0f;
 
+// Triangle wave between kFullDistanceCm and kEmptyDistanceCm.
+// Period: kWavePeriodMs. Used as a stand-in for the real ToF reading.
+float fakeDistanceCm(uint32_t nowMs) {
+  uint32_t t = nowMs % kWavePeriodMs;
+  float phase = float(t) / float(kWavePeriodMs);   // 0..1
+  // 0..0.5 ramps from full to empty, 0.5..1 ramps back.
+  float tri = (phase < 0.5f) ? (phase * 2.0f) : (2.0f - phase * 2.0f);
+  return kFullDistanceCm + tri * (kEmptyDistanceCm - kFullDistanceCm);
+}
+
+// Maps distance to fill level. 0% when distance >= empty, 100% when distance <= full.
+float computeLevelPct(float distanceCm) {
+  float span = kEmptyDistanceCm - kFullDistanceCm;
+  if (span <= 0.0f) return 0.0f;       // misconfigured — fail safe
+  float pct = (kEmptyDistanceCm - distanceCm) / span * 100.0f;
+  if (pct < 0.0f)   pct = 0.0f;
+  if (pct > 100.0f) pct = 100.0f;
+  return pct;
+}
+
+// Reads VBAT through the on-board 2:1 divider on GPIO0. Averages 16 samples.
+float readBatteryVoltage() {
+  constexpr int N = 16;
+  uint32_t mvSum = 0;
+  for (int i = 0; i < N; ++i) mvSum += analogReadMilliVolts(kBatteryAdcPin);
+  float adcMv = mvSum / float(N);
+  return (adcMv * kVbatDividerK) / 1000.0f;
+}
+
+// Linear-with-clamp Li-Po SoC mapping. Refine to a multi-point curve later.
+uint8_t batteryPercent(float vbat) {
+  constexpr float kFullV  = 4.20f;
+  constexpr float kEmptyV = 3.30f;
+  if (vbat >= kFullV)  return 100;
+  if (vbat <= kEmptyV) return 0;
+  return uint8_t((vbat - kEmptyV) * 100.0f / (kFullV - kEmptyV));
+}
+
 void setup() {
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);
