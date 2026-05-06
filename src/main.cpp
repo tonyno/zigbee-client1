@@ -69,11 +69,52 @@ uint8_t batteryPercent(float vbat) {
   return uint8_t((vbat - kEmptyV) * 100.0f / (kFullV - kEmptyV));
 }
 
+ZigbeeAnalog zbDistance(EP_DISTANCE);
+ZigbeeAnalog zbLevel(EP_LEVEL);
+
 void setup() {
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);
   delay(2000);
   Serial.println("boot");
+
+  analogReadResolution(12);
+  pinMode(kBatteryAdcPin, INPUT);
+
+  // EP 10: Basic + Power Config + Analog Input (distance in cm)
+  zbDistance.setManufacturerAndModel(MFR, MODEL);
+  zbDistance.setPowerSource(ZB_POWER_SOURCE_BATTERY, /*pct=*/100);
+  zbDistance.addAnalogInput();
+  zbDistance.setAnalogInputDescription("distance_cm");
+  zbDistance.setAnalogInputMinMax(0.0f, 500.0f);
+  zbDistance.setAnalogInputResolution(0.1f);
+
+  // EP 11: Analog Input (tank level %)
+  zbLevel.addAnalogInput();
+  zbLevel.setAnalogInputDescription("level_pct");
+  zbLevel.setAnalogInputMinMax(0.0f, 100.0f);
+  zbLevel.setAnalogInputResolution(1.0f);
+
+  Serial.println("Adding endpoints");
+  Zigbee.addEndpoint(&zbDistance);
+  Zigbee.addEndpoint(&zbLevel);
+
+  if (!Zigbee.begin()) {
+    Serial.println("Zigbee failed to start! Rebooting...");
+    delay(1000);
+    ESP.restart();
+  }
+
+  Serial.print("Connecting to network");
+  while (!Zigbee.connected()) {
+    Serial.print(".");
+    delay(100);
+  }
+  Serial.println();
+
+  zbDistance.setAnalogInputReporting(kRptMin, kRptMax, kRptDeltaCm);
+  zbLevel.setAnalogInputReporting(kRptMin, kRptMax, kRptDeltaPct);
+  Serial.println("Reporting configured");
 }
 
 void loop() {
