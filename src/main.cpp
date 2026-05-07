@@ -241,32 +241,44 @@ void measureAndSleepTask(void* arg) {
 // code runs (and the serial monitor sees nothing). So the procedure is
 // "press EN, then within windowMs start holding BOOT".
 //
-// Used by setup() at cold boot (windowMs = 5 s) and by loop() during
-// every wake (windowMs = 0, no wait — the user is already holding when
-// loop() polls).
-void handleFactoryResetButton(uint32_t windowMs) {
+// Returns true if BOOT was held for kBootHoldFactoryResetMs. The caller
+// decides what to do — cold boot plumbs this into Zigbee.begin(erase_nvs)
+// (Zigbee.factoryReset() crashes if the stack hasn't been initialized,
+// since it relies on partition handles opened by begin()), while runtime
+// callers from loop() can call Zigbee.factoryReset() directly.
+//
+// Used by setup() at cold boot (windowMs = 5 s — also serves as USB-CDC
+// settle delay) and by loop() during every wake (windowMs = 0, no wait).
+bool pollFactoryResetHold(uint32_t windowMs) {
   uint32_t pollStart = millis();
   while (digitalRead(BOOT_PIN) != LOW) {
-    if (millis() - pollStart >= windowMs) return;
+    if (millis() - pollStart >= windowMs) return false;
     delay(20);
   }
 
   delay(50);                                  // debounce
-  if (digitalRead(BOOT_PIN) != LOW) return;
+  if (digitalRead(BOOT_PIN) != LOW) return false;
 
   uint32_t pressStart = millis();
   while (digitalRead(BOOT_PIN) == LOW) {
     delay(50);
     if (millis() - pressStart > kBootHoldFactoryResetMs) {
-      Serial.println("Factory reset triggered. Clearing NVS and rebooting in 1 s.");
-      Preferences w;
-      w.begin(kPrefsNamespace, /*readOnly=*/false);
-      w.clear();
-      w.end();
-      delay(1000);
-      Zigbee.factoryReset();                  // does not return
+      // Drain the press so we don't double-trigger if the user is slow
+      // to release.
+      while (digitalRead(BOOT_PIN) == LOW) delay(50);
+      return true;
     }
   }
+  return false;
+}
+
+// Wipes our Preferences namespace (paired flag etc). Safe to call any
+// time — doesn't depend on Zigbee being initialized.
+void clearLocalPrefs() {
+  Preferences w;
+  w.begin(kPrefsNamespace, /*readOnly=*/false);
+  w.clear();
+  w.end();
 }
 
 void setup() {
@@ -278,9 +290,18 @@ void setup() {
   // Cold boot only: 5 s window for factory-reset BOOT-hold + USB-CDC
   // settle. Timer wakes from deep sleep skip both — no human pressing
   // buttons mid-cycle, and battery operation shouldn't pay for the wait.
+  // If the user holds BOOT for 3 s here, we set eraseNvsOnBegin so
+  // Zigbee.begin() wipes its NVS partitions during normal init. Calling
+  // Zigbee.factoryReset() here would crash — partition handles aren't
+  // open until begin() runs.
+  bool eraseNvsOnBegin = false;
   esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
   if (wakeCause == ESP_SLEEP_WAKEUP_UNDEFINED) {
-    handleFactoryResetButton(/*windowMs=*/kColdBootBootWindowMs);
+    if (pollFactoryResetHold(/*windowMs=*/kColdBootBootWindowMs)) {
+      Serial.println("Factory reset (cold boot) — clearing prefs; Zigbee NVS will be erased in begin().");
+      clearLocalPrefs();
+      eraseNvsOnBegin = true;
+    }
   }
 
   Serial.println("boot");
@@ -322,7 +343,7 @@ void setup() {
   zigbeeConfig.nwk_cfg.zed_cfg.keep_alive = 10000;
   Zigbee.setTimeout(30000);
 
-  if (!Zigbee.begin(&zigbeeConfig, /*erase_nvs=*/false)) {
+  if (!Zigbee.begin(&zigbeeConfig, /*erase_nvs=*/eraseNvsOnBegin)) {
     Serial.println("Zigbee failed to start! Rebooting...");
     delay(1000);
     ESP.restart();
@@ -344,6 +365,13 @@ void loop() {
   // Factory-reset path is reachable during any wake (including the long
   // first-pair interview window) because this loop runs in parallel with
   // the measure-and-sleep FreeRTOS task. Hold BOOT for 3 s to trigger.
-  handleFactoryResetButton(/*windowMs=*/0);
+  // Safe to call Zigbee.factoryReset() here — Zigbee.begin() has run by
+  // the time setup() returns and loop() starts.
+  if (pollFactoryResetHold(/*windowMs=*/0)) {
+    Serial.println("Factory reset (runtime). Clearing prefs and rebooting in 1 s.");
+    clearLocalPrefs();
+    delay(1000);
+    Zigbee.factoryReset();   // does not return
+  }
   delay(100);
 }
