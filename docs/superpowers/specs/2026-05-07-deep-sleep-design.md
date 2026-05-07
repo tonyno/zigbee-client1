@@ -180,8 +180,7 @@ Removed from `src/main.cpp` (no longer relevant):
 *   `kReportTickMs` (loop-tick cadence — no loop)
 *   `kRptMin`, `kRptMax`, `kRptDeltaCm`, `kRptDeltaPct` (named min/max/  
     delta reporting bindings — replaced by either explicit per-wake  
-    report calls, or a single permissive `setAnalogInputReporting(0, 1,  
-    0)`, depending on which API path the implementation takes; see  
+    report calls, or a single permissive `setAnalogInputReporting(0, 1, 0)`, depending on which API path the implementation takes; see  
     Reporting model)
 *   `kLedBri` (no LED)
 
@@ -229,7 +228,7 @@ The "Operational pattern" section needs to flip:
     ZED as the **current** behavior, with a `kSleepSeconds = 60` test  
     interval and a note that production target is 3600.
 *   "Final target (sleepy ZED, deferred)" subsection: collapse, since the  
-    current iteration *is* the sleepy ZED. Keep the bullet about light  
+    current iteration _is_ the sleepy ZED. Keep the bullet about light  
     sleep being unsupported in Arduino framework.
 
 The "Current status" section adds:
@@ -272,7 +271,7 @@ nothing regressed.
 
 ## Risks and unknowns
 
-*   **`setRxOnWhenIdle(false)` API name.** I'm 90 % sure this exists in  
+*   `**setRxOnWhenIdle(false)**` **API name.** I'm 90 % sure this exists in  
     Arduino-ESP32 Zigbee 3.3.8 (referenced in the sleepy temp/hum  
     example). If the actual symbol differs, the implementation will  
     discover and adjust — design intent is unchanged.

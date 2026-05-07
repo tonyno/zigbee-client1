@@ -8,85 +8,69 @@
 //   - Endpoint 11: Analog Input cluster, presentValue = tank fill level
 //                  in percent (0..100).
 //
-// Without this converter z2m treats the device as generic, exposes the
-// values with unit `°C` and labels `analog_input`, and does not configure
-// attribute reporting. With this converter installed the device pairs
-// with friendly names and reports flow automatically.
+// Format note: this is the **z2m 2.x modernExtend converter format**.
+// Each `m.numeric(...)` /  `m.battery()` block in the `extend` array
+// auto-generates a `configure()` step that sends the right ZDO Bind
+// requests + ZCL ConfigureReporting commands during pairing — z2m
+// invokes those automatically on every interview, with no `meta.configured`
+// hash dance to skip them. The legacy `module.exports = {fromZigbee,
+// toZigbee, configure}` form we shipped previously was loaded by z2m
+// 2.8.0 (UI showed "Supported: external") but its `configure` was not
+// being called on re-pairs, leaving the bind table empty. This format
+// fixes that.
 //
 // Install: copy this file into your z2m external_converters directory
-// (typically /config/zigbee2mqtt/external_converters/ on Home Assistant
-// installs) and restart z2m. See README in this repo for full steps.
+// (typically /share/zigbee2mqtt/external_converters/ on Home Assistant
+// installs — check your z2m data path) and restart z2m. See README in
+// this repo for full steps.
 
-const fz       = require('zigbee-herdsman-converters/converters/fromZigbee');
-const exposes  = require('zigbee-herdsman-converters/lib/exposes');
-const reporting = require('zigbee-herdsman-converters/lib/reporting');
-const e  = exposes.presets;
-const ea = exposes.access;
+const m = require('zigbee-herdsman-converters/lib/modernExtend');
 
-const fzLocal = {
-    // Maps the generic genAnalogInput.presentValue to either `distance`
-    // (endpoint 10) or `level` (endpoint 11) so each value gets its own
-    // top-level property in MQTT instead of colliding under `analog_input`.
-    distance_or_level: {
-        cluster: 'genAnalogInput',
-        type: ['attributeReport', 'readResponse'],
-        convert: (model, msg, publish, options, meta) => {
-            if (msg.data.presentValue === undefined) return undefined;
-            const v = parseFloat(msg.data.presentValue);
-            if (msg.endpoint.ID === 10) {
-                return {distance: Number(v.toFixed(1))};
-            }
-            if (msg.endpoint.ID === 11) {
-                return {level: Number(v.toFixed(0))};
-            }
-            return undefined;
-        },
-    },
-};
-
-module.exports = {
+const definition = {
     zigbeeModel: ['water-tank-sensor'],
     model: 'water-tank-sensor',
     vendor: 'czechit',
     description: 'DIY water-tank distance sensor (ESP32-C6)',
 
-    fromZigbee: [fz.battery, fzLocal.distance_or_level],
-    toZigbee: [],
+    extend: [
+        // Map endpoint numbers to short names used by m.numeric() below.
+        // Without this, z2m's herdsman-converters can't disambiguate
+        // genAnalogInput on EP10 vs EP11.
+        m.deviceEndpoints({endpoints: {'10': 10, '11': 11}}),
 
-    exposes: [
-        e.battery(),
-        exposes
-            .numeric('distance', ea.STATE)
-            .withUnit('cm')
-            .withDescription('Distance from sensor to water surface'),
-        exposes
-            .numeric('level', ea.STATE)
-            .withUnit('%')
-            .withDescription('Tank fill level (0–100 %)'),
-    ],
+        // Standard battery handling: binds genPowerCfg to the
+        // coordinator and configures reporting on
+        // batteryPercentageRemaining. z2m's built-in path; expects the
+        // attribute on the same endpoint as the power source — EP10
+        // for us, which is also the device's "primary" endpoint.
+        m.battery(),
 
-    configure: async (device, coordinatorEndpoint, logger) => {
-        const ep10 = device.getEndpoint(10);
-        const ep11 = device.getEndpoint(11);
-
-        // Bind the coordinator to the clusters we want unsolicited reports
-        // from. Without these binds the device has no destination to push
-        // reports to and z2m sees N/A until each manual read.
-        await reporting.bind(ep10, coordinatorEndpoint, ['genPowerCfg', 'genAnalogInput']);
-        await reporting.bind(ep11, coordinatorEndpoint, ['genAnalogInput']);
-
-        // Battery: every 1–60 minutes, or any 1% change.
-        await reporting.batteryPercentageRemaining(ep10, {min: 60, max: 3600, change: 1});
-
-        // Distance and level both report on the same cadence the firmware
-        // is configured for: 10–60 s, 1.0 unit change.
-        const analogCfg = [{
+        // EP10 / genAnalogInput.presentValue → exposed as `distance`.
+        // The reporting block tells z2m to ConfigureReporting on
+        // pairing: min 10 s, max 60 s, change 1.0 cm.
+        m.numeric({
+            name: 'distance',
+            cluster: 'genAnalogInput',
             attribute: 'presentValue',
-            minimumReportInterval: 10,
-            maximumReportInterval: 60,
-            reportableChange: 1,
-        }];
-        await ep10.configureReporting('genAnalogInput', analogCfg);
-        await ep11.configureReporting('genAnalogInput', analogCfg);
-    },
+            description: 'Distance from sensor to water surface',
+            unit: 'cm',
+            endpointNames: ['10'],
+            access: 'STATE_GET',
+            reporting: {min: 10, max: 60, change: 1},
+        }),
+
+        // EP11 / genAnalogInput.presentValue → exposed as `level`.
+        m.numeric({
+            name: 'level',
+            cluster: 'genAnalogInput',
+            attribute: 'presentValue',
+            description: 'Tank fill level (0–100 %)',
+            unit: '%',
+            endpointNames: ['11'],
+            access: 'STATE_GET',
+            reporting: {min: 10, max: 60, change: 1},
+        }),
+    ],
 };
+
+module.exports = definition;
