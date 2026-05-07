@@ -186,13 +186,22 @@ void setup() {
   Zigbee.addEndpoint(&zbDistance);
   Zigbee.addEndpoint(&zbLevel);
 
-  // Sleepy end device: tell the coordinator we won't keep our radio on
-  // listening between polls. This is the actual power-saving switch —
-  // deep sleep alone isn't enough if the coordinator thinks we're rx-on.
-  Zigbee.setRxOnWhenIdle(false);
-  Zigbee.setTimeout(30000);   // 10 s join timeout (default 30 s, longer = more battery)
+  // Custom End Device config matching the upstream sleepy temp/hum
+  // example. The keep_alive is the data-poll interval used by the Zigbee
+  // stack while awake; 10 s gives z2m's interview/configure round-trips
+  // enough headroom that Bind + ConfigureReporting commands actually land.
+  // We deliberately do NOT call Zigbee.setRxOnWhenIdle(false) — announcing
+  // as a true sleepy device makes z2m route Bind/ConfigureReporting through
+  // the parent's indirect buffer, which times out before the device polls,
+  // and also seems to make the coordinator drop us from its child table
+  // across deep-sleep gaps. The deep sleep itself still gives us full
+  // battery savings (radio is physically off); we just don't advertise
+  // sleepy capability over the air.
+  esp_zb_cfg_t zigbeeConfig = ZIGBEE_DEFAULT_ED_CONFIG();
+  zigbeeConfig.nwk_cfg.zed_cfg.keep_alive = 10000;
+  Zigbee.setTimeout(30000);
 
-  if (!Zigbee.begin()) {
+  if (!Zigbee.begin(&zigbeeConfig, /*erase_nvs=*/false)) {
     Serial.println("Zigbee failed to start! Rebooting...");
     delay(1000);
     ESP.restart();

@@ -27,11 +27,12 @@ firmware has since been re-targeted to a water-tank distance sensor; see
 
 ## Operational pattern
 
-**Current behavior (sleepy ZED with first-pair window):**
+**Current behavior (deep-sleep ZED with first-pair window):**
 
 - All work happens in `setup()`. `loop()` is empty.
 - **First boot after pairing (NVS flag `paired` absent):** join → run a 2-minute interview window with reports every 5 s so z2m can complete its interview (Basic cluster, endpoint walk, reporting bindings) → set NVS `paired = true` → fall through to one steady-state report → deep-sleep. The interview window is the difference between "device joined" and "device usable" — without it, z2m's interview times out mid-walk because the device sleeps too fast.
-- **Steady-state wake (NVS flag `paired` is true):** factory-reset check → `Zigbee.setRxOnWhenIdle(false)` → `Zigbee.begin()` (rejoins from NVS) → `reportSensors()` → 500 ms radio-flush delay → `esp_deep_sleep_start(kSleepSeconds × 1e6)`.
+- **Steady-state wake (NVS flag `paired` is true):** factory-reset check → `Zigbee.begin(&edConfig)` with `keep_alive = 10000` (rejoins from NVS) → `reportSensors()` → 500 ms radio-flush delay → `esp_deep_sleep_start(kSleepSeconds × 1e6)`.
+- The device does **NOT** announce itself as sleepy (`rxOnWhenIdle = false`) over the air. We tried that — it broke z2m's interview-time `Bind` / `ConfigureReporting` commands (z2m routes them via the parent's indirect-transmission buffer when the child is sleepy, and our poll cadence wasn't fast enough), and it caused the coordinator to drop the device from its child table across deep-sleep gaps, making rejoin fail. The deep sleep itself still gives full battery savings (radio is physically off); we simply don't advertise sleepy capability. The upstream `Zigbee_Temp_Hum_Sensor_Sleepy` example uses the same pattern (custom ED config with `keep_alive`, no `setRxOnWhenIdle` override).
 - `kSleepSeconds = 60` is the current test cadence (chosen for measuring overnight battery drain). Production target is `3600` (one hour) once drain numbers look acceptable — a single-constant change.
 - Network credentials persist in NVS across deep sleep, so warm-wake rejoins are fast (~3 s observed in similar ESP32-C6 projects).
 - Light sleep / instant command response is NOT supported in the Arduino framework. Don't try to add it. If that's needed later, the project must move to ESP-IDF + esp-zigbee-sdk directly.
