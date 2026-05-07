@@ -156,17 +156,21 @@ void handleFactoryResetButton() {
 void setup() {
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);
+
+  // Factory-reset check runs FIRST — before the 5-second USB-CDC settle
+  // delay — so "hold BOOT for 3 s" actually means 3 s, not 3 s + 5 s.
+  // Reading a GPIO doesn't need the serial host. The trade-off is that
+  // the "Factory reset triggered" log line won't be visible on the
+  // monitor (USB-CDC isn't ready yet), but the reset itself still
+  // happens correctly and the next cold boot prints normally.
+  pinMode(BOOT_PIN, INPUT_PULLUP);
+  handleFactoryResetButton();
+
   delay(5000);
   Serial.println("boot");
 
   analogReadResolution(12);
   pinMode(kBatteryAdcPin, INPUT);
-  pinMode(BOOT_PIN, INPUT_PULLUP);
-  // Factory reset has to be polled here — once the device enters its
-  // wake/sleep cycle, loop() is unreachable. To trigger it: press EN
-  // (reset) on the FireBeetle, then hold BOOT for 3 s during the brief
-  // window before Zigbee.begin().
-  handleFactoryResetButton();
 
   // EP 10: Basic + Power Config + Analog Input (distance in cm)
   zbDistance.setManufacturerAndModel(MFR, MODEL);
