@@ -1,5 +1,16 @@
 // Water-tank distance sensor (Zigbee end device).
-// See docs/superpowers/specs/2026-05-06-water-tank-zigbee-design.md.
+// See docs/superpowers/specs/2026-05-06-water-tank-zigbee-design.md
+// and docs/superpowers/specs/2026-05-07-deep-sleep-design.md.
+//
+// Architecture follows the upstream Zigbee_Temp_Hum_Sensor_Sleepy example
+// (inspiration/Zigbee_Temp_Hum_Sensor_Sleepy.ino):
+//   * setup() joins, then spawns a FreeRTOS measure-and-sleep task
+//   * the task pushes reports, waits for per-attribute ZCL acks via
+//     Zigbee.onGlobalDefaultResponse, retries on FAIL/timeout, then deep
+//     sleeps — giving us actual delivery confirmation instead of "report
+//     and pray with a 500 ms delay"
+//   * loop() polls BOOT, so factory-reset works during any wake window
+//     (including the long first-pair interview window)
 
 #ifndef ZIGBEE_MODE_ED
 #error "Zigbee end device mode is not selected (set -DZIGBEE_MODE_ED=1)"
@@ -24,23 +35,45 @@ constexpr uint32_t kWavePeriodMs = 5UL * 60UL * 1000UL;
 // ---- Sleep cycle ----
 // Test cadence — bump to 3600 (1 h) for production once overnight battery
 // drain has been measured and looks acceptable.
-constexpr uint32_t kSleepSeconds = 60;
-constexpr uint32_t kRadioFlushMs = 500;   // post-report settle before sleep
+constexpr uint32_t kSleepSeconds       = 60;
+constexpr uint32_t kReportTimeoutMs    = 1000;   // ack wait per attempt
+constexpr uint8_t  kReportMaxRetries   = 3;
 
 // ---- First-pair window ----
-// Stay awake long enough after the very first join for z2m to complete
-// its interview (Basic cluster read, endpoint discovery, reporting binding
-// installation). Without this, the device sleeps mid-interview and ends
-// up half-paired in z2m. NVS flag flips after one successful window so
-// subsequent boots skip straight to the steady-state sleep cycle.
+// Stay awake long enough after the very first join for z2m to complete its
+// interview AND its converter's configure() callback (Bind +
+// ConfigureReporting commands). Without this, the device sleeps mid-walk
+// and ends up half-paired in z2m — interview shows ✓ but Bind/Reporting
+// tabs stay empty and Distance/Level read N/A. NVS flag flips after one
+// successful window so subsequent boots skip straight to the steady-state
+// sleep cycle.
 constexpr uint32_t kInterviewWindowMs = 120000;   // 2 min
-constexpr uint32_t kInterviewTickMs   = 5000;     // report every 5 s during window
+constexpr uint32_t kInterviewTickMs   = 5000;     // periodic report cadence
 constexpr char     kPrefsNamespace[]  = "watertank";
 constexpr char     kPrefsPairedKey[]  = "paired";
 
 // ---- Battery sense (DFR1075 built-in 2:1 divider on GPIO0) ----
 constexpr uint8_t  kBatteryAdcPin = 0;
 constexpr float    kVbatDividerK  = 2.0f;
+
+// ---- BOOT button (factory reset) ----
+constexpr uint32_t kBootHoldFactoryResetMs = 3000;   // hold this long for a reset
+constexpr uint32_t kColdBootBootWindowMs   = 5000;   // poll BOOT this long at cold boot
+
+// ZigbeeAnalog endpoints. Constructed at module scope so they're visible
+// to setup(), the measure-task, and the global ack callback.
+ZigbeeAnalog zbDistance(EP_DISTANCE);
+ZigbeeAnalog zbLevel(EP_LEVEL);
+
+// Per-cycle ack tracking. The global default-response callback decrements
+// g_pendingAcks on each successful ZB_CMD_REPORT_ATTRIBUTE response and
+// sets g_resendNeeded on FAIL. Both are reset before each report attempt
+// by the measure task. Only the two Analog Input reports are tracked —
+// battery is fire-and-forget (the Power Config cluster's report path may
+// or may not feed the same callback path; if we tracked it and it didn't
+// callback, we'd never get to sleep).
+volatile uint8_t g_pendingAcks   = 0;
+volatile bool    g_resendNeeded  = false;
 
 // Triangle wave between kFullDistanceCm and kEmptyDistanceCm.
 // Period: kWavePeriodMs. Used as a stand-in for the real ToF reading.
@@ -80,37 +113,85 @@ uint8_t batteryPercent(float vbat) {
   return uint8_t((vbat - kEmptyV) * 100.0f / (kFullV - kEmptyV));
 }
 
+// Fires for every ZCL command response from the coordinator. We only care
+// about ZB_CMD_REPORT_ATTRIBUTE responses for the two Analog Input
+// endpoints — those are the ones the measure task waits for.
+void onGlobalResponse(zb_cmd_type_t command, esp_zb_zcl_status_t status,
+                      uint8_t endpoint, uint16_t cluster) {
+  Serial.printf("zb resp: cmd=%d status=%s ep=%u cluster=0x%04x pending=%u\n",
+                command, esp_zb_zcl_status_to_name(status), endpoint, cluster,
+                g_pendingAcks);
+  if (command != ZB_CMD_REPORT_ATTRIBUTE) return;
+  if (endpoint != EP_DISTANCE && endpoint != EP_LEVEL) return;
+  switch (status) {
+    case ESP_ZB_ZCL_STATUS_SUCCESS:
+      if (g_pendingAcks > 0) g_pendingAcks--;
+      break;
+    case ESP_ZB_ZCL_STATUS_FAIL:
+      g_resendNeeded = true;
+      break;
+    default:
+      break;
+  }
+}
 
-ZigbeeAnalog zbDistance(EP_DISTANCE);
-ZigbeeAnalog zbLevel(EP_LEVEL);
-
-// Push current sensor values + battery state to the coordinator. Used in
-// both the first-pair window (called repeatedly) and the steady-state
-// path (called once per wake before sleep).
+// Push current sensor values + battery state to the coordinator. Called
+// from the measure task and the interview-window loop. Resets the ack
+// tracker to 2 (one per Analog Input) before sending so the caller can
+// wait on g_pendingAcks reaching 0.
 void reportSensors() {
   uint32_t now = millis();
   float d   = fakeDistanceCm(now);
   float pct = computeLevelPct(d);
 
+  g_pendingAcks  = 2;
+  g_resendNeeded = false;
+
   zbDistance.setAnalogInput(d);
   zbLevel.setAnalogInput(pct);
-  zbDistance.reportAnalogInput();      // explicit push (no min/max/delta binding)
+  zbDistance.reportAnalogInput();
   zbLevel.reportAnalogInput();
 
   float vbat   = readBatteryVoltage();
   uint8_t bpct = batteryPercent(vbat);
   zbDistance.setBatteryPercentage(bpct);
   zbDistance.setBatteryVoltage(uint8_t(vbat * 10.0f));   // attribute is 100-mV units
-  zbDistance.reportBatteryPercentage();
+  zbDistance.reportBatteryPercentage();                  // fire-and-forget
 
   Serial.println("reported: distance=" + String(d, 1) + "cm level=" + String(pct, 1) + "% vbat=" + String(vbat, 2) + "V (" + String(bpct) + "%)");
 }
 
+// Wait until the two Analog Input reports are ack'd by the coordinator,
+// or kReportMaxRetries timeouts have happened. Resends on FAIL/timeout.
+// Pattern adapted from the upstream sleepy temp/hum example.
+void waitForReportAcks() {
+  uint32_t startTime = millis();
+  uint8_t  tries     = 0;
+  Serial.print("waiting for ack ");
+  while (g_pendingAcks != 0 && tries < kReportMaxRetries) {
+    if (g_resendNeeded) {
+      Serial.println("\nresend on FAIL");
+      reportSensors();   // resets pending counter back to 2
+      startTime = millis();
+    }
+    if (millis() - startTime >= kReportTimeoutMs) {
+      Serial.println("\nack timeout, resend");
+      reportSensors();
+      startTime = millis();
+      tries++;
+    }
+    Serial.print(".");
+    delay(50);
+  }
+  Serial.println(g_pendingAcks == 0 ? " ok" : " gave up");
+}
+
 // First-pair window: keep the device awake for kInterviewWindowMs after a
-// successful cold-boot join, sending periodic reports. Gives z2m enough
-// uninterrupted radio access to walk the Basic cluster, discover both
-// endpoints, and install reporting bindings before the device disappears
-// into the deep-sleep duty cycle.
+// cold-boot join, sending periodic reports so z2m has uninterrupted
+// access to walk the Basic cluster and run the converter's configure()
+// callback (Bind + ConfigureReporting). Reports during the window do NOT
+// wait for acks — z2m may answer slowly or out of order while
+// interviewing, and we don't want to block the cycle.
 void runInterviewWindow() {
   Serial.println("First pair — staying awake " + String(kInterviewWindowMs / 1000) + " s for z2m interview");
   uint32_t start = millis();
@@ -125,24 +206,44 @@ void runInterviewWindow() {
     delay(50);
   }
   Serial.println("Interview window done");
+  Preferences w;
+  w.begin(kPrefsNamespace, /*readOnly=*/false);
+  w.putBool(kPrefsPairedKey, true);
+  w.end();
+  Serial.println("Marked as paired in NVS.");
 }
 
-// 3-second BOOT-button hold triggers Zigbee.factoryReset() which clears
-// NVS-stored network credentials and reboots. We also clear our paired
-// flag so the next boot re-enters the first-pair window.
-//
+// FreeRTOS task: report → wait for ack (with retries) → deep-sleep.
+// On the very first cold-boot pair, runs the 2-minute interview window
+// before the final report. Created from setup() once Zigbee is connected.
+void measureAndSleepTask(void* arg) {
+  Preferences prefs;
+  prefs.begin(kPrefsNamespace, /*readOnly=*/true);
+  bool firstPair = !prefs.isKey(kPrefsPairedKey);
+  prefs.end();
+
+  if (firstPair) runInterviewWindow();
+
+  reportSensors();
+  waitForReportAcks();
+
+  Serial.println("Sleeping for " + String(kSleepSeconds) + " s");
+  Serial.flush();
+  esp_sleep_enable_timer_wakeup(uint64_t(kSleepSeconds) * 1000000ULL);
+  esp_deep_sleep_start();   // does not return
+}
+
 // Polls BOOT for up to windowMs first — gives the user time to start
 // pressing the button after the EN release. We CANNOT detect BOOT held
 // during the EN press itself: GPIO9 is the chip's strap pin and is
 // sampled at reset to choose normal vs UART-download boot mode. Holding
-// BOOT across the EN press puts the chip into download mode, where no
-// application code runs (and the serial monitor sees nothing). So the
-// procedure is "press EN, then within windowMs start holding BOOT".
+// BOOT across EN puts the chip into download mode, where no application
+// code runs (and the serial monitor sees nothing). So the procedure is
+// "press EN, then within windowMs start holding BOOT".
 //
-// On cold boot we pass a generous 5 s window, which also doubles as the
-// USB-CDC settle delay so the serial monitor has time to (re)attach.
-// On timer wakes we skip the function entirely — no human is pressing
-// buttons mid-cycle, and battery operation shouldn't pay for the wait.
+// Used by setup() at cold boot (windowMs = 5 s) and by loop() during
+// every wake (windowMs = 0, no wait — the user is already holding when
+// loop() polls).
 void handleFactoryResetButton(uint32_t windowMs) {
   uint32_t pollStart = millis();
   while (digitalRead(BOOT_PIN) != LOW) {
@@ -156,7 +257,7 @@ void handleFactoryResetButton(uint32_t windowMs) {
   uint32_t pressStart = millis();
   while (digitalRead(BOOT_PIN) == LOW) {
     delay(50);
-    if (millis() - pressStart > 3000) {
+    if (millis() - pressStart > kBootHoldFactoryResetMs) {
       Serial.println("Factory reset triggered. Clearing NVS and rebooting in 1 s.");
       Preferences w;
       w.begin(kPrefsNamespace, /*readOnly=*/false);
@@ -174,14 +275,12 @@ void setup() {
 
   pinMode(BOOT_PIN, INPUT_PULLUP);
 
-  // Cold boot only: 5 s window for the user to start holding BOOT
-  // (factory reset). Doubles as USB-CDC settle delay so the serial
-  // monitor has time to (re)attach before the first prints. Timer
-  // wakes from deep sleep skip both — no human is interacting and we
-  // want minimum active time on battery.
+  // Cold boot only: 5 s window for factory-reset BOOT-hold + USB-CDC
+  // settle. Timer wakes from deep sleep skip both — no human pressing
+  // buttons mid-cycle, and battery operation shouldn't pay for the wait.
   esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
   if (wakeCause == ESP_SLEEP_WAKEUP_UNDEFINED) {
-    handleFactoryResetButton(/*windowMs=*/5000);
+    handleFactoryResetButton(/*windowMs=*/kColdBootBootWindowMs);
   }
 
   Serial.println("boot");
@@ -207,17 +306,18 @@ void setup() {
   Zigbee.addEndpoint(&zbDistance);
   Zigbee.addEndpoint(&zbLevel);
 
-  // Custom End Device config matching the upstream sleepy temp/hum
-  // example. The keep_alive is the data-poll interval used by the Zigbee
-  // stack while awake; 10 s gives z2m's interview/configure round-trips
-  // enough headroom that Bind + ConfigureReporting commands actually land.
-  // We deliberately do NOT call Zigbee.setRxOnWhenIdle(false) — announcing
-  // as a true sleepy device makes z2m route Bind/ConfigureReporting through
-  // the parent's indirect buffer, which times out before the device polls,
-  // and also seems to make the coordinator drop us from its child table
-  // across deep-sleep gaps. The deep sleep itself still gives us full
-  // battery savings (radio is physically off); we just don't advertise
-  // sleepy capability over the air.
+  // Global ack callback BEFORE Zigbee.begin so it catches every report
+  // response from the moment the network is up.
+  Zigbee.onGlobalDefaultResponse(onGlobalResponse);
+
+  // Custom ED config: keep_alive = 10 s data-poll interval. Matches the
+  // upstream sleepy temp/hum example's pattern. We deliberately do NOT
+  // call Zigbee.setRxOnWhenIdle(false) — announcing as a true sleepy
+  // device makes z2m route Bind/ConfigureReporting through the parent's
+  // indirect buffer, which times out, and seems to make the coordinator
+  // drop us across deep-sleep gaps. Deep sleep already gives full battery
+  // savings (the radio is physically off when the chip is asleep); we
+  // just don't advertise sleepy capability over the air.
   esp_zb_cfg_t zigbeeConfig = ZIGBEE_DEFAULT_ED_CONFIG();
   zigbeeConfig.nwk_cfg.zed_cfg.keep_alive = 10000;
   Zigbee.setTimeout(30000);
@@ -235,34 +335,15 @@ void setup() {
   }
   Serial.println("CONNECTED");
 
-  // First-pair detection. NVS key survives reboots and deep sleep, and
-  // is wiped together with Zigbee credentials by handleFactoryResetButton().
-  Preferences prefs;
-  prefs.begin(kPrefsNamespace, /*readOnly=*/true);
-  bool firstPair = !prefs.isKey(kPrefsPairedKey);
-  prefs.end();
-
-  if (firstPair) {
-    runInterviewWindow();
-    Preferences w;
-    w.begin(kPrefsNamespace, /*readOnly=*/false);
-    w.putBool(kPrefsPairedKey, true);
-    w.end();
-    Serial.println("Marked as paired in NVS. Entering sleep cycle.");
-  }
-
-  // Steady-state: one report, brief radio flush, deep-sleep.
-  reportSensors();
-  delay(kRadioFlushMs);                // let the radio drain queued frames
-
-  Serial.println("Sleeping for " + String(kSleepSeconds) + " s");
-  Serial.flush();                       // make sure the line lands before USB-CDC dies
-  esp_sleep_enable_timer_wakeup(uint64_t(kSleepSeconds) * 1000000ULL);
-  esp_deep_sleep_start();               // does not return
+  // Hand off to the measure-and-sleep task. setup() returns; loop() then
+  // polls BOOT until the task calls esp_deep_sleep_start.
+  xTaskCreate(measureAndSleepTask, "measure_and_sleep", 4096, nullptr, 10, nullptr);
 }
 
 void loop() {
-  // Empty — every wake runs setup() to completion, then deep-sleeps.
-  // loop() is only reached if esp_deep_sleep_start() ever returns, which
-  // it doesn't.
+  // Factory-reset path is reachable during any wake (including the long
+  // first-pair interview window) because this loop runs in parallel with
+  // the measure-and-sleep FreeRTOS task. Hold BOOT for 3 s to trigger.
+  handleFactoryResetButton(/*windowMs=*/0);
+  delay(100);
 }
