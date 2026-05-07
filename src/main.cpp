@@ -6,6 +6,7 @@
 #endif
 
 #include "Zigbee.h"
+#include <Preferences.h>
 
 // ---- Identity (Basic cluster strings) ----
 constexpr uint8_t  EP_DISTANCE = 10;
@@ -25,6 +26,17 @@ constexpr uint32_t kWavePeriodMs = 5UL * 60UL * 1000UL;
 // drain has been measured and looks acceptable.
 constexpr uint32_t kSleepSeconds = 60;
 constexpr uint32_t kRadioFlushMs = 500;   // post-report settle before sleep
+
+// ---- First-pair window ----
+// Stay awake long enough after the very first join for z2m to complete
+// its interview (Basic cluster read, endpoint discovery, reporting binding
+// installation). Without this, the device sleeps mid-interview and ends
+// up half-paired in z2m. NVS flag flips after one successful window so
+// subsequent boots skip straight to the steady-state sleep cycle.
+constexpr uint32_t kInterviewWindowMs = 120000;   // 2 min
+constexpr uint32_t kInterviewTickMs   = 5000;     // report every 5 s during window
+constexpr char     kPrefsNamespace[]  = "watertank";
+constexpr char     kPrefsPairedKey[]  = "paired";
 
 // ---- Battery sense (DFR1075 built-in 2:1 divider on GPIO0) ----
 constexpr uint8_t  kBatteryAdcPin = 0;
@@ -72,9 +84,54 @@ uint8_t batteryPercent(float vbat) {
 ZigbeeAnalog zbDistance(EP_DISTANCE);
 ZigbeeAnalog zbLevel(EP_LEVEL);
 
+// Push current sensor values + battery state to the coordinator. Used in
+// both the first-pair window (called repeatedly) and the steady-state
+// path (called once per wake before sleep).
+void reportSensors() {
+  uint32_t now = millis();
+  float d   = fakeDistanceCm(now);
+  float pct = computeLevelPct(d);
+
+  zbDistance.setAnalogInput(d);
+  zbLevel.setAnalogInput(pct);
+  zbDistance.reportAnalogInput();      // explicit push (no min/max/delta binding)
+  zbLevel.reportAnalogInput();
+
+  float vbat   = readBatteryVoltage();
+  uint8_t bpct = batteryPercent(vbat);
+  zbDistance.setBatteryPercentage(bpct);
+  zbDistance.setBatteryVoltage(uint8_t(vbat * 10.0f));   // attribute is 100-mV units
+  zbDistance.reportBatteryPercentage();
+
+  Serial.println("reported: distance=" + String(d, 1) + "cm level=" + String(pct, 1) + "% vbat=" + String(vbat, 2) + "V (" + String(bpct) + "%)");
+}
+
+// First-pair window: keep the device awake for kInterviewWindowMs after a
+// successful cold-boot join, sending periodic reports. Gives z2m enough
+// uninterrupted radio access to walk the Basic cluster, discover both
+// endpoints, and install reporting bindings before the device disappears
+// into the deep-sleep duty cycle.
+void runInterviewWindow() {
+  Serial.println("First pair — staying awake " + String(kInterviewWindowMs / 1000) + " s for z2m interview");
+  uint32_t start = millis();
+  uint32_t lastTick = 0;
+  while (millis() - start < kInterviewWindowMs) {
+    if (millis() - lastTick >= kInterviewTickMs || lastTick == 0) {
+      reportSensors();
+      uint32_t remainS = (kInterviewWindowMs - (millis() - start)) / 1000;
+      Serial.println("interview window: " + String(remainS) + " s remaining");
+      lastTick = millis();
+    }
+    delay(50);
+  }
+  Serial.println("Interview window done");
+}
+
 // 3-second BOOT-button hold triggers Zigbee.factoryReset() which clears
-// NVS-stored network credentials and reboots; the device must then be
-// re-paired in zigbee2mqtt.
+// NVS-stored network credentials and reboots. We also clear our paired
+// flag so the next boot re-enters the first-pair window — otherwise the
+// device would rejoin into a freshly-empty Zigbee NVS but skip the
+// interview window, ending up half-paired all over again.
 void handleFactoryResetButton() {
   if (digitalRead(BOOT_PIN) != LOW) return;
 
@@ -85,7 +142,11 @@ void handleFactoryResetButton() {
   while (digitalRead(BOOT_PIN) == LOW) {
     delay(50);
     if (millis() - pressStart > 3000) {
-      Serial.println("Factory reset triggered. Rebooting in 1s.");
+      Serial.println("Factory reset triggered. Clearing NVS and rebooting in 1 s.");
+      Preferences w;
+      w.begin(kPrefsNamespace, /*readOnly=*/false);
+      w.clear();
+      w.end();
       delay(1000);
       Zigbee.factoryReset();                  // does not return
     }
@@ -144,24 +205,24 @@ void setup() {
   }
   Serial.println("CONNECTED");
 
-  // Measure → report → sleep. Runs once per cold boot or timer wake.
-  uint32_t now = millis();
-  float d   = fakeDistanceCm(now);
-  float pct = computeLevelPct(d);
+  // First-pair detection. NVS key survives reboots and deep sleep, and
+  // is wiped together with Zigbee credentials by handleFactoryResetButton().
+  Preferences prefs;
+  prefs.begin(kPrefsNamespace, /*readOnly=*/true);
+  bool firstPair = !prefs.isKey(kPrefsPairedKey);
+  prefs.end();
 
-  zbDistance.setAnalogInput(d);
-  zbLevel.setAnalogInput(pct);
-  zbDistance.reportAnalogInput();      // explicit push (no min/max/delta binding)
-  zbLevel.reportAnalogInput();
+  if (firstPair) {
+    runInterviewWindow();
+    Preferences w;
+    w.begin(kPrefsNamespace, /*readOnly=*/false);
+    w.putBool(kPrefsPairedKey, true);
+    w.end();
+    Serial.println("Marked as paired in NVS. Entering sleep cycle.");
+  }
 
-  float vbat   = readBatteryVoltage();
-  uint8_t bpct = batteryPercent(vbat);
-  zbDistance.setBatteryPercentage(bpct);
-  zbDistance.setBatteryVoltage(uint8_t(vbat * 10.0f));   // attribute is 100-mV units
-  zbDistance.reportBatteryPercentage();
-
-  Serial.println("reported: distance=" + String(d, 1) + "cm level=" + String(pct, 1) + "% vbat=" + String(vbat, 2) + "V (" + String(bpct) + "%)");
-
+  // Steady-state: one report, brief radio flush, deep-sleep.
+  reportSensors();
   delay(kRadioFlushMs);                // let the radio drain queued frames
 
   Serial.println("Sleeping for " + String(kSleepSeconds) + " s");

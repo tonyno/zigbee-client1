@@ -27,14 +27,16 @@ firmware has since been re-targeted to a water-tank distance sensor; see
 
 ## Operational pattern
 
-**Current behavior (sleepy ZED):**
+**Current behavior (sleepy ZED with first-pair window):**
 
 - All work happens in `setup()`. `loop()` is empty.
-- Each wake: factory-reset check → `Zigbee.setRxOnWhenIdle(false)` → `Zigbee.begin()` (rejoins from NVS) → measure → `setAnalogInput` + `reportAnalogInput` per endpoint → `reportBatteryPercentage` → 500 ms radio-flush delay → `esp_deep_sleep_start(kSleepSeconds × 1e6)`.
+- **First boot after pairing (NVS flag `paired` absent):** join → run a 2-minute interview window with reports every 5 s so z2m can complete its interview (Basic cluster, endpoint walk, reporting bindings) → set NVS `paired = true` → fall through to one steady-state report → deep-sleep. The interview window is the difference between "device joined" and "device usable" — without it, z2m's interview times out mid-walk because the device sleeps too fast.
+- **Steady-state wake (NVS flag `paired` is true):** factory-reset check → `Zigbee.setRxOnWhenIdle(false)` → `Zigbee.begin()` (rejoins from NVS) → `reportSensors()` → 500 ms radio-flush delay → `esp_deep_sleep_start(kSleepSeconds × 1e6)`.
 - `kSleepSeconds = 60` is the current test cadence (chosen for measuring overnight battery drain). Production target is `3600` (one hour) once drain numbers look acceptable — a single-constant change.
 - Network credentials persist in NVS across deep sleep, so warm-wake rejoins are fast (~3 s observed in similar ESP32-C6 projects).
 - Light sleep / instant command response is NOT supported in the Arduino framework. Don't try to add it. If that's needed later, the project must move to ESP-IDF + esp-zigbee-sdk directly.
-- Factory reset works only during the cold-boot window: press EN, then hold BOOT for 3 s before `Zigbee.begin()` is called. There's no LED indication.
+- Factory reset works only during the cold-boot window: press EN, then hold BOOT for 3 s before `Zigbee.begin()` is called. The reset clears both Zigbee credentials and the NVS `paired` flag, so the next boot re-runs the interview window. There's no LED indication.
+- BOOT button cannot wake the device from deep sleep on the FireBeetle 2 C6 — BOOT is wired to GPIO9, which is outside the chip's LP-IO domain (only GPIO0–7 can wake from deep sleep). Use EN (reset) for an instant cold boot, or `pio run -t erase` to wipe everything from the host.
 
 ## Toolchain
 
