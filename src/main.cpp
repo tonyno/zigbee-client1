@@ -53,7 +53,8 @@ constexpr uint32_t kWavePeriodMs = 5UL * 60UL * 1000UL;
 // Test cadence — bump to 3600 (1 h) for production once overnight battery
 // drain has been measured and looks acceptable.
 constexpr uint32_t kSleepSeconds       = 60;
-constexpr uint32_t kReportTimeoutMs    = 3000;   // total ack wait per cycle (no retry — see waitForReportAcks)
+constexpr uint32_t kReportTimeoutMs    = 8000;   // total ack wait per cycle (no retry — see waitForReportAcks)
+constexpr uint32_t kPostJoinSettleMs   = 1000;   // let the parent link stabilize before the first report on warm rejoin
 
 // ---- First-pair window ----
 // Stay awake long enough after the very first join for z2m to complete its
@@ -289,20 +290,23 @@ void reportSensors() {
   zbDistance.setBatteryPercentage(bpct);                 // ep10 0x0001 → auto-report
   zbDistance.setBatteryVoltage(uint8_t(vbat * 10.0f));   // attribute is 100-mV units, no auto-report
 
-  Serial.printf("set: distance=%.1fcm level=%.1f%% vbat=%.2fV (%u%%) [pending=%u apsRx=%lu txOk=%lu txFail=%lu]\n",
+  Serial.printf("set: distance=%.1fcm level=%.1f%% vbat=%.2fV (%u%%) [pending=%u apsRx=%lu]\n",
                 d, pct, vbat, bpct, g_pendingAcks,
-                (unsigned long)g_apsRxCount,
-                (unsigned long)g_apsTxOk,
-                (unsigned long)g_apsTxFail);
+                (unsigned long)g_apsRxCount);
 
   // Belt-and-suspenders: also fire a manual one-shot report. This
-  // uses the binding table (addr_mode 0). If z2m's configure() ever
-  // installs a bind, these will reach the coordinator; if not, the
-  // stack drops them silently — same as before. Either way, they
-  // surface in the APS confirm log so we can see whether they
-  // actually leave the radio.
+  // uses the binding table — once z2m's configure() has installed
+  // binds (Bind tab populated in z2m UI), these reach the
+  // coordinator. The auto-reporting path (set up in
+  // configureAutoReporting) is a separate way to get the same data
+  // out via dst.short_addr=0; we send both so whichever path z2m's
+  // wired up that pairing actually delivers. Each successful report
+  // produces one zb resp: cmd=10 line below.
+  Serial.println("manual report → distance ep10 cluster=0x000C");
   zbDistance.reportAnalogInput();
+  Serial.println("manual report → level ep11 cluster=0x000C");
   zbLevel.reportAnalogInput();
+  Serial.println("manual report → battery ep10 cluster=0x0001");
   zbDistance.reportBatteryPercentage();
 }
 
@@ -310,21 +314,21 @@ void reportSensors() {
 // ack'd by the coordinator, or the timeout fires. We do NOT retry on
 // timeout: with auto-reporting the only way to "re-send" is to mutate
 // the attribute again, and the wake cycle naturally retries on the
-// next boot anyway. Worst case we miss one report — z2m has its own
-// last_seen tracking that handles this.
+// next boot anyway. The summary line at the end says how many
+// out of 3 reports actually landed — anything < 3 means the radio
+// path was flaky for this wake and we'll retry on the next.
 void waitForReportAcks() {
+  const uint8_t kExpectedAcks = 3;
   uint32_t startTime = millis();
-  Serial.print("waiting for ack ");
+  Serial.print("waiting for acks ");
   while (g_pendingAcks > 0 && millis() - startTime < kReportTimeoutMs) {
     Serial.print(".");
     delay(50);
   }
-  if (g_pendingAcks == 0) {
-    Serial.printf(" ok (took %lu ms)\n", (unsigned long)(millis() - startTime));
-  } else {
-    Serial.printf(" timeout (pending=%u after %lu ms)\n",
-                  g_pendingAcks, (unsigned long)(millis() - startTime));
-  }
+  uint8_t got = (g_pendingAcks <= kExpectedAcks) ? (kExpectedAcks - g_pendingAcks) : 0;
+  Serial.printf("\nacks: %u/%u after %lu ms (%s)\n",
+                got, kExpectedAcks, (unsigned long)(millis() - startTime),
+                g_pendingAcks == 0 ? "ok" : "timeout");
 }
 
 // First-pair window: keep the device awake for kInterviewWindowMs after a
@@ -354,16 +358,28 @@ void runInterviewWindow() {
   Serial.println("Marked as paired in NVS.");
 }
 
-// FreeRTOS task: report → wait for ack (with retries) → deep-sleep.
-// On the very first cold-boot pair, runs the 2-minute interview window
-// before the final report. Created from setup() once Zigbee is connected.
+// FreeRTOS task: report → wait for ack → deep-sleep. On the very
+// first cold-boot pair, runs the 2-minute interview window before the
+// final report. Created from setup() once Zigbee is connected.
+//
+// Steady-state wakes: a small post-rejoin settling delay before the
+// first report. Without it the parent's APS path back to the
+// coordinator isn't always ready in the few ms after Zigbee.connected()
+// returns and the first one or two reports get lost. 1 s is enough on
+// our network; bump if your parent is further away.
 void measureAndSleepTask(void* arg) {
   Preferences prefs;
   prefs.begin(kPrefsNamespace, /*readOnly=*/true);
   bool firstPair = !prefs.isKey(kPrefsPairedKey);
   prefs.end();
 
-  if (firstPair) runInterviewWindow();
+  if (firstPair) {
+    runInterviewWindow();
+  } else {
+    Serial.printf("post-rejoin settle: delay(%lu ms)\n",
+                  (unsigned long)kPostJoinSettleMs);
+    delay(kPostJoinSettleMs);
+  }
 
   reportSensors();
   waitForReportAcks();
