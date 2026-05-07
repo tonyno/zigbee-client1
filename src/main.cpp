@@ -129,11 +129,26 @@ void runInterviewWindow() {
 
 // 3-second BOOT-button hold triggers Zigbee.factoryReset() which clears
 // NVS-stored network credentials and reboots. We also clear our paired
-// flag so the next boot re-enters the first-pair window — otherwise the
-// device would rejoin into a freshly-empty Zigbee NVS but skip the
-// interview window, ending up half-paired all over again.
-void handleFactoryResetButton() {
-  if (digitalRead(BOOT_PIN) != LOW) return;
+// flag so the next boot re-enters the first-pair window.
+//
+// Polls BOOT for up to windowMs first — gives the user time to start
+// pressing the button after the EN release. We CANNOT detect BOOT held
+// during the EN press itself: GPIO9 is the chip's strap pin and is
+// sampled at reset to choose normal vs UART-download boot mode. Holding
+// BOOT across the EN press puts the chip into download mode, where no
+// application code runs (and the serial monitor sees nothing). So the
+// procedure is "press EN, then within windowMs start holding BOOT".
+//
+// On cold boot we pass a generous 5 s window, which also doubles as the
+// USB-CDC settle delay so the serial monitor has time to (re)attach.
+// On timer wakes we skip the function entirely — no human is pressing
+// buttons mid-cycle, and battery operation shouldn't pay for the wait.
+void handleFactoryResetButton(uint32_t windowMs) {
+  uint32_t pollStart = millis();
+  while (digitalRead(BOOT_PIN) != LOW) {
+    if (millis() - pollStart >= windowMs) return;
+    delay(20);
+  }
 
   delay(50);                                  // debounce
   if (digitalRead(BOOT_PIN) != LOW) return;
@@ -157,16 +172,18 @@ void setup() {
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);
 
-  // Factory-reset check runs FIRST — before the 5-second USB-CDC settle
-  // delay — so "hold BOOT for 3 s" actually means 3 s, not 3 s + 5 s.
-  // Reading a GPIO doesn't need the serial host. The trade-off is that
-  // the "Factory reset triggered" log line won't be visible on the
-  // monitor (USB-CDC isn't ready yet), but the reset itself still
-  // happens correctly and the next cold boot prints normally.
   pinMode(BOOT_PIN, INPUT_PULLUP);
-  handleFactoryResetButton();
 
-  delay(5000);
+  // Cold boot only: 5 s window for the user to start holding BOOT
+  // (factory reset). Doubles as USB-CDC settle delay so the serial
+  // monitor has time to (re)attach before the first prints. Timer
+  // wakes from deep sleep skip both — no human is interacting and we
+  // want minimum active time on battery.
+  esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
+  if (wakeCause == ESP_SLEEP_WAKEUP_UNDEFINED) {
+    handleFactoryResetButton(/*windowMs=*/5000);
+  }
+
   Serial.println("boot");
 
   analogReadResolution(12);
