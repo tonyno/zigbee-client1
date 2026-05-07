@@ -95,7 +95,7 @@ void handleFactoryResetButton() {
 void setup() {
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);
-  delay(50);
+  delay(5000);
   Serial.println("boot");
 
   analogReadResolution(12);
@@ -129,7 +129,7 @@ void setup() {
   // listening between polls. This is the actual power-saving switch —
   // deep sleep alone isn't enough if the coordinator thinks we're rx-on.
   Zigbee.setRxOnWhenIdle(false);
-  Zigbee.setTimeout(10000);   // 10 s join timeout (default 30 s, longer = more battery)
+  Zigbee.setTimeout(30000);   // 10 s join timeout (default 30 s, longer = more battery)
 
   if (!Zigbee.begin()) {
     Serial.println("Zigbee failed to start! Rebooting...");
@@ -142,7 +142,7 @@ void setup() {
     Serial.print(".");
     delay(100);
   }
-  Serial.println();
+  Serial.println("CONNECTED");
 
   // Measure → report → sleep. Runs once per cold boot or timer wake.
   uint32_t now = millis();
