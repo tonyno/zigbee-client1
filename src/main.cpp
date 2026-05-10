@@ -52,7 +52,7 @@ constexpr uint32_t kWavePeriodMs = 5UL * 60UL * 1000UL;
 // ---- Sleep cycle ----
 // Test cadence — bump to 3600 (1 h) for production once overnight battery
 // drain has been measured and looks acceptable.
-constexpr uint32_t kSleepSeconds       = 30;
+constexpr uint32_t kSleepSeconds       = 5;
 constexpr uint32_t kReportTimeoutMs    = 8000;   // total ack wait per cycle (no retry — see waitForReportAcks)
 constexpr uint32_t kPostJoinSettleMs   = 1000;   // let the parent link stabilize before the first report on warm rejoin
 
@@ -551,6 +551,6 @@ void loop() {
     clearLocalPrefs();
     delay(1000);
     Zigbee.factoryReset();   // does not return
-  }
+  } 
   delay(100);
 }
